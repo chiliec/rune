@@ -89,6 +89,7 @@ import (
 	"unstable.build/rune/internal/text/emacs"
 	"unstable.build/rune/internal/text/exoeditor"
 	"unstable.build/rune/internal/text/exofallback"
+	"unstable.build/rune/internal/text/helix"
 	"unstable.build/rune/internal/text/standard"
 	"unstable.build/rune/internal/text/textrpc"
 	"unstable.build/rune/internal/text/vi"
@@ -330,6 +331,8 @@ func (h *workspaceManagerHandler) newEditor(
 	switch cfg.editorMode() {
 	case editorModeModal:
 		return h.newBuiltinModalEditor(cwd, cfg, svc), nil
+	case editorModeHelix:
+		return h.newBuiltinHelixEditor(cwd, cfg, svc), nil
 	case editorModeStandard:
 		return h.newBuiltinStandardEditor(cwd, cfg, svc), nil
 	case editorModeEmacs:
@@ -373,6 +376,38 @@ func (h *workspaceManagerHandler) newBuiltinModalEditor(
 		vi.WithNotifications(h.notifications.current()),
 	)
 	return vi.Editor(viOpts...)
+}
+
+func (h *workspaceManagerHandler) newBuiltinHelixEditor(
+	cwd workspaceapi.URI, cfg ideConfig, svc vctrl.Service,
+) text.Editor {
+	auxBarConfig := cfg.auxiliaryBarConfig(h, svc)
+	iconsBarConfig := cfg.iconsBarConfig(h)
+	statusBarConfig := cfg.statusBarConfig(cwd, h, svc)
+	return helix.Editor(
+		helix.WithResAttr(cfg.helixResultAttr()),
+		helix.WithBarAttr(cfg.helixMessageBarAttr()),
+		helix.WithMessageBarLayout(cfg.helixMessageBarLayout()),
+		helix.WithTabspaces(cfg.editorTabspaces()),
+		helix.WithIndents(cfg.editorIndents()),
+		helix.WithRuler(cfg.editorRuler()),
+		helix.WithAutoPair(cfg.editorAutoPair()),
+		helix.WithComments(cfg.editorComments()),
+		helix.WithScheduleNextTick(cfg.scheduleNextTick),
+		helix.WithAttr(cfg.helixAttr()),
+		helix.WithAuxiliaryBar(cfg.auxiliaryBarEnabled(), auxBarConfig),
+		helix.WithIconsBar(cfg.iconsBarEnabled(), iconsBarConfig),
+		helix.WithGitIcons(cfg.gitIconsEnabled()),
+		helix.WithStatusBarConfig(cfg.statusBarEnabled(), statusBarConfig),
+		helix.WithHideInitialFolds(cfg.initialFolds()),
+		helix.WithClipboard(h.clip),
+		helix.WithMacroRecorder(h.macro),
+		helix.WithMacroPlayer(h.macroPlayer),
+		helix.WithWorkspaceCommandRegistry(cwd, h),
+		helix.WithAutoCenter(true),
+		// See newBuiltinModalEditor for why we route notifications.
+		helix.WithNotifications(h.notifications.current()),
+	)
 }
 
 func (h *workspaceManagerHandler) newBuiltinStandardEditor(
@@ -448,6 +483,8 @@ func (h *workspaceManagerHandler) newExoFallbackEditor(
 ) text.Editor {
 	var fallback text.Editor
 	switch cfg.exoFallback() {
+	case editorFallbackHelix:
+		fallback = h.newBuiltinHelixEditor(cwd, cfg, svc)
 	case editorFallbackStandard:
 		fallback = h.newBuiltinStandardEditor(cwd, cfg, svc)
 	case editorFallbackEmacs:
@@ -500,6 +537,14 @@ func (h *workspaceManagerHandler) newPromptEditor(
 		}
 	case editorModeModal:
 		return viPromptEditor{
+			tabspaces:        cfg.editorTabspaces(),
+			indents:          cfg.editorIndents(),
+			scheduleNextTick: cfg.scheduleNextTick,
+			clipboard:        h.clip,
+			autoPair:         cfg.editorAutoPair(),
+		}
+	case editorModeHelix:
+		return helixPromptEditor{
 			tabspaces:        cfg.editorTabspaces(),
 			indents:          cfg.editorIndents(),
 			scheduleNextTick: cfg.scheduleNextTick,
@@ -570,6 +615,26 @@ func (v viPromptEditor) Edit(buf *cell.Buffer) command.EditHandler {
 		vi.WithClipboard(v.clipboard),
 		vi.WithAutoPair(v.autoPair),
 		vi.WithWrap(false),
+	)
+}
+
+type helixPromptEditor struct {
+	tabspaces        int
+	indents          text.IndentConfig
+	scheduleNextTick func(func()) bool
+	clipboard        clipboard.Register
+	autoPair         bool
+}
+
+func (p helixPromptEditor) Edit(buf *cell.Buffer) command.EditHandler {
+	uri := workspaceapi.RandomURI("memory")
+	return helix.NewWithIndent(buf, uri, text.IndentRuneTab, p.tabspaces,
+		helix.WithTabspaces(p.tabspaces),
+		helix.WithIndents(p.indents),
+		helix.WithScheduleNextTick(p.scheduleNextTick),
+		helix.WithClipboard(p.clipboard),
+		helix.WithAutoPair(p.autoPair),
+		helix.WithWrap(false),
 	)
 }
 
@@ -700,7 +765,7 @@ func (h *workspaceManagerHandler) init(
 		vctrl.NopService(),
 		h.newPromptEditor(cfg), h.commandObserver, h.debugCommands,
 		cfg.commandPromptCfg(),
-		cfg.pkgEditorMode() == editorModeModal,
+		modalEditorMode(cfg.pkgEditorMode()),
 		cfg.editorMode(),
 		cfg.editorAutoSave(),
 		cfg.consoleCfg(),
@@ -1868,7 +1933,7 @@ func (h *workspaceManagerHandler) buildWorkspaceAsync(
 		vctrlService,
 		h.newPromptEditor(cfg), h.commandObserver, h.debugCommands,
 		cfg.commandPromptCfg(),
-		cfg.pkgEditorMode() == editorModeModal,
+		modalEditorMode(cfg.pkgEditorMode()),
 		cfg.editorMode(),
 		cfg.editorAutoSave(),
 		cfg.consoleCfg(),
